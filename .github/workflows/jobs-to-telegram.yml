@@ -1,0 +1,47 @@
+# नवीन jobs Telegram channel वर post करणारा scheduled workflow
+name: Jobs to Telegram
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"  # दर 6 तासांनी (UTC), :17 ला — top-of-hour गर्दी टाळण्यासाठी
+  workflow_dispatch:         # हाताने चालवण्यासाठी (test)
+    inputs:
+      dry_run:
+        description: "Dry run (only show what would be posted)"
+        type: boolean
+        default: true        # manual run डीफॉल्ट सुरक्षित — post करत नाही
+
+permissions:
+  contents: write            # posted.json commit करण्यासाठी
+
+concurrency:
+  group: jobs-to-telegram    # दोन runs एकाच वेळी नकोत (duplicate post टाळणे)
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Post new jobs
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FEED_URL: ${{ vars.FEED_URL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python3 post_jobs.py
+
+      - name: Save posted list
+        if: always()         # post step fail झाला तरी यशस्वी posts ची नोंद साठवा
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898783+github-actions[bot]@users.noreply.github.com"
+          git add posted.json 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update posted jobs list"
+            git push
+          fi
