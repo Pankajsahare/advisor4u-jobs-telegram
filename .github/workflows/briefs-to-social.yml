@@ -1,0 +1,54 @@
+# नवीन Market Brief posts Telegram + Facebook वर पाठवणारा scheduled workflow
+name: Market Brief to Social
+
+on:
+  schedule:
+    # सोम–शनि, दर 30 मिनिटांनी, सकाळी 7:30 ते रात्री 9:00 IST (UTC: 02:00–15:30)
+    - cron: "11,41 2-15 * * 1-6"
+  workflow_dispatch:          # हाताने चालवण्यासाठी (test)
+    inputs:
+      dry_run:
+        description: "Dry run (only show what would be posted)"
+        type: boolean
+        default: true         # manual run डीफॉल्ट सुरक्षित — post करत नाही
+
+permissions:
+  contents: write             # posted_briefs.json commit करण्यासाठी
+
+concurrency:
+  group: briefs-to-social     # दोन runs एकाच वेळी नकोत (duplicate post टाळणे)
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Post new briefs
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BRIEF_TELEGRAM_CHAT_ID: ${{ secrets.BRIEF_TELEGRAM_CHAT_ID }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          FB_GRAPH_VERSION: ${{ vars.FB_GRAPH_VERSION }}
+          BRIEF_FEED_URL: ${{ vars.BRIEF_FEED_URL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python3 post_briefs.py
+
+      - name: Save posted list
+        if: always()          # post step fail झाला तरी यशस्वी posts ची नोंद साठवा
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898783+github-actions[bot]@users.noreply.github.com"
+          git add posted_briefs.json 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update posted briefs list"
+            # jobs workflow ने मधेच commit केला असेल तर आधी तो घ्या, मग push
+            git pull --rebase --quiet || true
+            git push
+          fi
