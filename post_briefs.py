@@ -12,7 +12,9 @@ import html
 import json
 import os
 import re
+import socket
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,6 +30,19 @@ EXCERPT_CHARS = 260            # सारांशाची कमाल ला
 TIMEOUT_SECONDS = 30
 USER_AGENT = "Mozilla/5.0 (compatible; Advisor4uBriefBot/1.0)"  # काही hosts default python UA block करतात
 GRAPH_VERSION_DEFAULT = "v23.0"  # Facebook Graph API version (repo Variables मध्ये FB_GRAPH_VERSION ने बदलता येतो)
+FETCH_ATTEMPTS = 3               # feed मिळाला नाही तर एकूण इतके प्रयत्न
+RETRY_WAIT_SECONDS = 15          # दोन प्रयत्नांमधला वेळ
+
+# GitHub runners वर IPv6 नसतो ("Network is unreachable"). म्हणून आधी IPv4 पत्ता वापरा.
+_ORIG_GETADDRINFO = socket.getaddrinfo
+
+
+def _ipv4_first(*args, **kwargs):
+    """DNS उत्तरांपैकी IPv4 पत्ते आधी, IPv6 नंतर."""
+    return sorted(_ORIG_GETADDRINFO(*args, **kwargs), key=lambda r: r[0] != socket.AF_INET)
+
+
+socket.getaddrinfo = _ipv4_first
 
 
 def load_state() -> set[str] | None:
@@ -68,11 +83,18 @@ def shorten(text: str, limit: int) -> str:
 def fetch_posts(feed_url: str) -> list[dict[str, str]]:
     """RSS feed मधून posts ची यादी (id, title, link, excerpt) — नवीन आधी."""
     request = urllib.request.Request(feed_url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            raw = response.read()
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Feed fetch failed: {exc}") from exc
+    raw = b""
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+                raw = response.read()
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            # site क्षणभर उत्तर देत नसेल तर थोडं थांबून पुन्हा प्रयत्न
+            if attempt == FETCH_ATTEMPTS:
+                raise RuntimeError(f"Feed fetch failed after {attempt} attempts: {exc}") from exc
+            print(f"WARNING: feed fetch attempt {attempt} failed ({exc}); retrying in {RETRY_WAIT_SECONDS}s")
+            time.sleep(RETRY_WAIT_SECONDS)
 
     try:
         root = ET.fromstring(raw)
