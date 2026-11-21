@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -19,6 +20,14 @@ from pathlib import Path
 #   पर्याय: code न बदलता repo Settings → Variables मध्ये FEED_URL ठेवू शकता
 #   चुकीचा असल्यास: "Feed fetch failed" error ने workflow थांबेल
 DEFAULT_FEED_URL = "https://www.advisor4u.in/?post_type=awsm_job_openings&feed=rss2"  # ← येथे बदला
+
+# फक्त याच path ने सुरू होणाऱ्या links job मानल्या जातात (HireZoot चा default slug "jobs").
+# कारण: plugin बंद असताना WordPress हाच feed URL blog posts सह परत देतो — ते Telegram वर जाऊ नयेत.
+#   Slug बदलल्यास repo Settings → Variables मध्ये JOB_PATH_PREFIX ठेवा (उदा. "/careers/").
+DEFAULT_JOB_PATH_PREFIX = "/jobs/"
+
+# Telegram bot token चं स्वरूप: अंक:अक्षरे (मध्ये space/newline नसावी)
+TOKEN_PATTERN = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
 
 STATE_FILE = Path("posted.json")
 MAX_POSTS_PER_RUN = 5  # एका run मध्ये जास्तीत जास्त posts (channel spam टाळण्यासाठी)
@@ -97,6 +106,8 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError(f"Telegram API error {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Telegram request failed: {exc.reason}") from exc
+    except ValueError as exc:  # InvalidURL सह — token मध्ये अवैध अक्षर असल्यास
+        raise RuntimeError(f"Telegram request invalid: {exc}") from exc
 
     if not result.get("ok"):
         raise RuntimeError(f"Telegram API returned not ok: {result}")
@@ -109,15 +120,37 @@ def main() -> int:
     feed_url = os.environ.get("FEED_URL", "").strip() or DEFAULT_FEED_URL
     dry_run = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 
-    if not dry_run and (not token or not chat_id):
-        print("ERROR: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secrets are missing")
-        return 1
+    job_prefix = os.environ.get("JOB_PATH_PREFIX", "").strip() or DEFAULT_JOB_PATH_PREFIX
+
+    if not dry_run:
+        if not token or not chat_id:
+            print("ERROR: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secrets are missing")
+            return 1
+        # token ची value log मध्ये कधीच छापू नये — फक्त स्वरूप तपासा
+        if not TOKEN_PATTERN.match(token):
+            print(
+                "ERROR: TELEGRAM_BOT_TOKEN format is invalid (contains a space, newline "
+                "or extra text). Re-paste only the token from @BotFather."
+            )
+            return 1
 
     try:
-        jobs = fetch_jobs(feed_url)
+        items = fetch_jobs(feed_url)
     except RuntimeError as exc:
         print(f"ERROR: {exc}")
         return 1
+
+    # फक्त job links ठेवा; blog posts / इतर पाने वगळा
+    jobs = [
+        item for item in items
+        if urllib.parse.urlparse(item["link"]).path.startswith(job_prefix)
+    ]
+    skipped = len(items) - len(jobs)
+    if skipped:
+        print(f"WARNING: skipped {skipped} non-job item(s) (link not under {job_prefix})")
+    if items and not jobs:
+        print("WARNING: feed has no job items. Is the HireZoot plugin active? Nothing posted.")
+        return 0
     print(f"Feed OK: {len(jobs)} open job(s) found")
 
     posted = load_posted_ids()
