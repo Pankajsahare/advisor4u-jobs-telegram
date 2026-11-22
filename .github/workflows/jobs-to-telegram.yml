@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Post new jobs
         env:
@@ -43,5 +43,9 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Update posted jobs list"
-            git push
+            for attempt in 1 2 3; do
+              if git pull -q --rebase origin main && git push -q origin HEAD:main; then break; fi
+              [ "$attempt" = 3 ] && { echo "::error::push failed"; exit 1; }
+              sleep $((attempt * 5))
+            done
           fi
